@@ -36,10 +36,18 @@ def load_stock_data(figi, start_date, end_date):
     stock_collection.insert_many(stocks)
 
 
-# Загрузка данных за последние 15 лет (15 раз за год)
-for figi, ticker in figi_ticker_map.items():
-    for year in range(2008, 2024):
-        start_date = datetime(year, 1, 1).strftime('%Y-%m-%dT00:00:00Z')
-        end_date = datetime(year + 1, 1, 1).strftime('%Y-%m-%dT00:00:00Z')
-        load_stock_data(figi, start_date, end_date)
-    print('Done!')
+def load_new_stock(figi, start_date, end_date):
+    # Загрузка данных за последние 15 лет (15 раз за год)
+    for figi, ticker in figi_ticker_map.items():
+        for year in range(2008, 2024):
+            start_date = datetime(year, 1, 1).strftime('%Y-%m-%dT00:00:00Z')
+            end_date = datetime(year + 1, 1, 1).strftime('%Y-%m-%dT00:00:00Z')
+            load_stock_data(figi, start_date, end_date)
+        print('Done!')
+
+
+def update_stock_data(figi):
+    today = datetime.utcnow().date()
+    start_date = today - timedelta(days=1)
+    end_date = today
+    load_stock_data(figi, start_date, end_date)
