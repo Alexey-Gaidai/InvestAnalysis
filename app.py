@@ -1,25 +1,18 @@
+
 from flask import Flask, request, jsonify
-from pymongo import MongoClient
 from bson.json_util import dumps
-from bson.objectid import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from functools import wraps
 
 import predict_module
+import database_interaction as database
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-client = MongoClient(
-    'mongodb+srv://thealexis95:Suckmydick1204@cluster0.d7rmw.mongodb.net/InvestForecast?retryWrites=true&w=majority')
-db = client['InvestForecast']
-users_collection = db['Users']
-stock_info_collection = db['StockInfo']
-stock_collection = db['Stock']
-
-
+# Декоратор для проверки наличия токена
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -33,13 +26,12 @@ def token_required(f):
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            object_id = ObjectId(data['user_id'])
-            print(data['user_id'])
-            current_user = users_collection.find_one({"_id": object_id})
+            user_id = int(data['user_id'])
+            current_user = database.get_user_by_id(user_id)
             print(current_user)
         except:
             return jsonify({'message': 'Token is invalid!'}), 401
-        return f(object_id, *args, **kwargs)
+        return f(user_id, *args, **kwargs)
 
     return decorated
 
@@ -52,12 +44,12 @@ def register():
 
     user = {
         "name": data['name'],
+        "lastname": data['lastname'],
         "email": data['email'],
         "password": hashed_password,
-        "investment_portfolio": []
     }
 
-    result = users_collection.insert_one(user)
+    user_id = database.add_user(user)
 
     return jsonify({'message': 'User created successfully!'})
 
@@ -69,17 +61,17 @@ def login():
     if not auth or not auth.username or not auth.password:
         return jsonify({'message': 'Could not verify'}), 401
 
-    user = users_collection.find_one({"email": auth.username})
-
+    user = database.get_user_by_email(auth.username)
+    print(user)
     if not user:
         return jsonify({'message': 'Could not verify'}), 401
 
-    if check_password_hash(user['password'], auth.password):
+    if check_password_hash(user[3], auth.password):
         token = jwt.encode(
-            {'user_id': str(user['_id']), 'exp': datetime.utcnow() + timedelta(minutes=60)},
+            {'user_id': str(user[0]), 'exp': datetime.utcnow() + timedelta(minutes=60)},
             app.config['SECRET_KEY'], algorithm="HS256")
 
-        return jsonify({'token': token, 'user_id': str(user['_id'])})
+        return jsonify({'token': token, 'user_id': str(user[0])})
 
     return jsonify({'message': 'Could not verify'}), 401
 
@@ -87,98 +79,55 @@ def login():
 @app.route('/add_stock', methods=['POST'])
 @token_required
 def add_stock(user_id):
-    print(user_id)
     ticker = request.args.get('ticker')
     qty = int(request.args.get('quantity'))
-    object_id = ObjectId(user_id)
-    current_user = users_collection.find_one({"_id": object_id})
-    print(current_user)
-    portfolio = current_user['investment_portfolio']
-    existing_stock = next((stock for stock in portfolio if stock['ticker'] == ticker), None)
 
-    if existing_stock:
-        existing_stock['qty'] += qty
-        existing_stock['date_added'] = datetime.now()
-    else:
-        stock = {
-            'ticker': ticker,
-            'qty': qty,
-            'date_added': datetime.now()
-        }
-        portfolio.append(stock)
+    stock_info = database.get_stock_info_by_ticker(ticker)
 
-    users_collection.update_one({'_id': current_user['_id']}, {'$set': {'investment_portfolio': portfolio}})
+    # Добавление акций в таблицу usershares
+    share_id = database.get_share_id(ticker)
+    purchase_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    database.insert_share_to_portfolio(user_id, share_id, qty, stock_info[3], purchase_date)
 
     return jsonify({'message': 'Stock added successfully!'})
-
-
-def calculate_portfolio_returns(investment_portfolio):
-    total_investment = 0
-    total_returns = 0
-
-    for stock in investment_portfolio:
-        ticker = stock['ticker']
-        qty = stock['count']
-
-        stock_info = stock_info_collection.find_one({"ticker": ticker})
-        if stock_info:
-            last_price = stock_info['lastPrice']
-            investment = last_price * qty
-            total_investment += investment
-
-            if 'initialPrice' in stock:
-                initial_price = stock['initialPrice']
-                initial_investment = initial_price * qty
-                returns = investment - initial_investment
-                total_returns += returns
-
-    if total_investment != 0:
-        portfolio_returns = (total_returns / total_investment) * 100
-    else:
-        portfolio_returns = 0
-
-    return portfolio_returns
 
 
 @app.route('/portfolio', methods=['GET'])
 @token_required
 def get_portfolio(user_id):
-    current_user = users_collection.find_one({"_id": user_id})
-    investment_portfolio = current_user['investment_portfolio']
+    start_date = "2022-06-18"
+    end_date = "2023-06-19"
 
-    total = 0
+    # Получение данных о портфеле (название, тикер, цена и количество акций)
+    percentage_return, monetary_return = predict_module.calculate_dietz_return(user_id, start_date, end_date)
+
+    # Получение данных о портфеле (название, тикер, цена и количество акций)
+    portfolio_data = database.get_users_shares(user_id)  # Замените на свою функцию для получения данных портфеля
+
+    # Расчет общей стоимости портфеля
+
     stocks = []
 
-    for stock in investment_portfolio:
-        ticker = stock['ticker']
-        qty = int(stock['qty'])
+    for stock in portfolio_data:
+        shareinfo = database.get_share_by_id(stock[2])
+        new_stock = {
+            "count": stock[3],
+            "name": shareinfo[2],
+            "pricePerOne": shareinfo[3],
+            "ticker": shareinfo[1],
+            "total": stock[3]*shareinfo[3]
+        }
+        stocks.append(new_stock)
 
-        stock_info = stock_info_collection.find_one({"ticker": ticker})
-
-        if stock_info:
-            name = stock_info['name']
-            price_per_one = stock_info['lastPrice']
-            stock_total = price_per_one * qty
-            total += stock_total
-            initialPrice = stock_collection.find_one({"date": stock['date_added']})
-            stock_data = {
-                "ticker": ticker,
-                "name": name,
-                "count": qty,
-                "pricePerOne": round(price_per_one, 2),
-                "total": round(stock_total, 2),
-                "initialPrice": round(initialPrice['close'], 2)
-            }
-
-            stocks.append(stock_data)
-
-    portfolio_returns = calculate_portfolio_returns(stocks)
-
+    total_value = sum(stock['total'] for stock in stocks)
     response = {
         "investment_portfolio": {
-            "total": round(total, 2),
+            "returns": {
+                "percentage_return": percentage_return,
+                "monetary_return": monetary_return
+            },
             "stocks": stocks,
-            "returns": round(portfolio_returns, 2)
+            "total": total_value
         }
     }
 
@@ -187,20 +136,42 @@ def get_portfolio(user_id):
 
 @app.route('/stocks', methods=['GET'])
 def get_stock_info():
-    stock_info = stock_info_collection.find()
-    return dumps(stock_info)
+    stock_info = database.get_stock_info()
+    response = []
+    for stock in stock_info:
+        data = {
+            "id": stock[0],
+            "ticker": stock[1],
+            "name": stock[2],
+            "lastPrice": stock[3]
+        }
+        response.append(data)
+    print(stock_info)
+    return dumps(response)
 
 
 @app.route('/stocks/<ticker>', methods=['GET'])
 def get_stock_prices(ticker):
-    projection = {"_id": 0, "date": 1, "close": 1}
-    stock_prices = stock_collection.find({"ticker": ticker}, projection)
-    return dumps(stock_prices)
+    share = database.get_share_by_ticker(ticker)
+    stock_prices = database.get_stock_prices(share[0])
+    response = []
+    for stock in stock_prices:
+        data = {
+            "date": stock[0],
+            "open": stock[1],
+            "high": stock[2],
+            "low": stock[3],
+            "close": stock[4],
+            "volume": stock[5],
+        }
+        response.append(data)
+    return dumps(response, default=str)
 
 
 @app.route('/stocks/<ticker>/forecast', methods=['GET'])
 def get_stock_forecast(ticker):
-    stock_prices = list(stock_collection.find())
+    share = database.get_share_by_ticker(ticker)
+    stock_prices = list(database.get_stock_prices(share[0]))
     forecast = predict_module.make_forecast(stock_prices)
     response = []
     for entry in forecast:
@@ -210,6 +181,7 @@ def get_stock_forecast(ticker):
         })
 
     return jsonify(response)
+
 
 
 if __name__ == '__main__':
