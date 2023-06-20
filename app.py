@@ -1,4 +1,6 @@
+import json
 
+import pandas as pd
 from flask import Flask, request, jsonify
 from bson.json_util import dumps
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -11,6 +13,7 @@ import database_interaction as database
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
+
 
 # Декоратор для проверки наличия токена
 def token_required(f):
@@ -104,29 +107,34 @@ def get_portfolio(user_id):
     # Получение данных о портфеле (название, тикер, цена и количество акций)
     portfolio_data = database.get_users_shares(user_id)  # Замените на свою функцию для получения данных портфеля
 
-    # Расчет общей стоимости портфеля
-
-    stocks = []
+    # Создание словаря для объединения акций по тикеру
+    stocks = {}
 
     for stock in portfolio_data:
         shareinfo = database.get_share_by_id(stock[2])
-        new_stock = {
-            "count": stock[3],
-            "name": shareinfo[2],
-            "pricePerOne": shareinfo[3],
-            "ticker": shareinfo[1],
-            "total": stock[3]*shareinfo[3]
-        }
-        stocks.append(new_stock)
+        ticker = shareinfo[1]
+        if ticker in stocks:
+            # Если акция с таким тикером уже существует в портфеле, обновляем информацию
+            stocks[ticker]['count'] += stock[3]
+            stocks[ticker]['total'] += stock[3] * shareinfo[3]
+        else:
+            # Если акции с таким тикером нет в портфеле, добавляем ее
+            stocks[ticker] = {
+                "count": stock[3],
+                "name": shareinfo[2],
+                "pricePerOne": shareinfo[3],
+                "ticker": ticker,
+                "total": stock[3] * shareinfo[3]
+            }
 
-    total_value = sum(stock['total'] for stock in stocks)
+    total_value = sum(stock['total'] for stock in stocks.values())
     response = {
         "investment_portfolio": {
             "returns": {
                 "percentage_return": percentage_return,
                 "monetary_return": monetary_return
             },
-            "stocks": stocks,
+            "stocks": list(stocks.values()),
             "total": total_value
         }
     }
@@ -172,16 +180,40 @@ def get_stock_prices(ticker):
 def get_stock_forecast(ticker):
     share = database.get_share_by_ticker(ticker)
     stock_prices = list(database.get_stock_prices(share[0]))
-    forecast = predict_module.make_forecast(stock_prices)
+    df = make_df(stock_prices)
+    prophet = predict_module.Prophet_Prediction(df, 30)
+    lin_reg = predict_module.LinReg_Prediction(df, 30)
+    rnn = predict_module.RNN_LSTM_Prediction(df, 30)
+    prophet_forecast = prophet.forecast()
+    linreg_forecast = lin_reg.forecast(30)
+    rnn_forecast = rnn.forecast()
+    #forecast = predict_module.make_forecast(stock_prices)
     response = []
-    for entry in forecast:
-        response.append({
-            "date": entry[0].strftime('%Y-%m-%dT00:00:00Z'),
-            "close": entry[2]
-        })
+    print(prophet_forecast)
+    print(linreg_forecast)
+    print(rnn_forecast)
+    prophet_data = [{'date': date.strftime('%Y-%m-%d'), 'close': close} for date, close in
+                    zip(prophet_forecast.index, prophet_forecast['close'])]
+    linreg_data = [{'date': date.strftime('%Y-%m-%d %H:%M:%S'), 'close': close} for date, close in
+                   zip(linreg_forecast.index, linreg_forecast['forecast'])]
+    rnn_data = [{'date': date.strftime('%Y-%m-%d %H:%M:%S'), 'close': close[0]} for date, close in zip(pd.to_datetime(rnn_forecast.index), rnn_forecast.values)]
+    response = {
+        'prophet': prophet_data,
+        'linreg': linreg_data,
+        'rnn': rnn_data
+    }
 
-    return jsonify(response)
+    return json.dumps(response)
 
+def make_df(stock_prices):
+    df = pd.DataFrame(stock_prices)
+    # Переименование столбцов
+    df.rename(columns={0: 'date', 1: 'open', 2: 'high', 3: 'low', 4: 'close', 5: 'volume'}, inplace=True)
+    if 'date' in df:
+        df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
+    print(df)
+    df.set_index('date', inplace=True)
+    return df
 
 
 if __name__ == '__main__':
